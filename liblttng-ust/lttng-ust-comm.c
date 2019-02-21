@@ -373,7 +373,7 @@ ssize_t lttng_ust_read(int fd, void *buf, size_t len)
 	return ret;
 }
 /*
- * Returns the HOME directory path. Caller MUST NOT free(3) the returned
+ * Returns the HOME directory path. Caller MUST NOT free the returned
  * pointer.
  */
 static
@@ -768,7 +768,7 @@ int handle_message(struct sock_info *sock_info,
 			goto error;
 		}
 
-		bytecode = zmalloc(sizeof(*bytecode) + lum->u.filter.data_size);
+		bytecode = lttng_ust_zmalloc(sizeof(*bytecode) + lum->u.filter.data_size);
 		if (!bytecode) {
 			ret = -ENOMEM;
 			goto error;
@@ -778,7 +778,7 @@ int handle_message(struct sock_info *sock_info,
 		switch (len) {
 		case 0:	/* orderly shutdown */
 			ret = 0;
-			free(bytecode);
+			lttng_ust_free(bytecode);
 			goto error;
 		default:
 			if (len == lum->u.filter.data_size) {
@@ -789,16 +789,16 @@ int handle_message(struct sock_info *sock_info,
 				if (len == -ECONNRESET) {
 					ERR("%s remote end closed connection", sock_info->name);
 					ret = len;
-					free(bytecode);
+					lttng_ust_free(bytecode);
 					goto error;
 				}
 				ret = len;
-				free(bytecode);
+				lttng_ust_free(bytecode);
 				goto error;
 			} else {
 				DBG("incorrect filter data message size: %zd", len);
 				ret = -EINVAL;
-				free(bytecode);
+				lttng_ust_free(bytecode);
 				goto error;
 			}
 		}
@@ -810,12 +810,12 @@ int handle_message(struct sock_info *sock_info,
 					(unsigned long) bytecode,
 					&args, sock_info);
 			if (ret) {
-				free(bytecode);
+				lttng_ust_free(bytecode);
 			}
 			/* don't free bytecode if everything went fine. */
 		} else {
 			ret = -ENOSYS;
-			free(bytecode);
+			lttng_ust_free(bytecode);
 		}
 		break;
 	}
@@ -831,7 +831,7 @@ int handle_message(struct sock_info *sock_info,
 			ret = 0;
 			goto error;
 		}
-		node = zmalloc(sizeof(*node) +
+		node = lttng_ust_zmalloc(sizeof(*node) +
 				count * LTTNG_UST_SYM_NAME_LEN);
 		if (!node) {
 			ret = -ENOMEM;
@@ -843,7 +843,7 @@ int handle_message(struct sock_info *sock_info,
 		switch (len) {
 		case 0:	/* orderly shutdown */
 			ret = 0;
-			free(node);
+			lttng_ust_free(node);
 			goto error;
 		default:
 			if (len == count * LTTNG_UST_SYM_NAME_LEN) {
@@ -854,16 +854,16 @@ int handle_message(struct sock_info *sock_info,
 				if (len == -ECONNRESET) {
 					ERR("%s remote end closed connection", sock_info->name);
 					ret = len;
-					free(node);
+					lttng_ust_free(node);
 					goto error;
 				}
 				ret = len;
-				free(node);
+				lttng_ust_free(node);
 				goto error;
 			} else {
 				DBG("Incorrect exclusion data message size: %zd", len);
 				ret = -EINVAL;
-				free(node);
+				lttng_ust_free(node);
 				goto error;
 			}
 		}
@@ -872,12 +872,12 @@ int handle_message(struct sock_info *sock_info,
 					(unsigned long) node,
 					&args, sock_info);
 			if (ret) {
-				free(node);
+				lttng_ust_free(node);
 			}
 			/* Don't free exclusion data if everything went fine. */
 		} else {
 			ret = -ENOSYS;
-			free(node);
+			lttng_ust_free(node);
 		}
 		break;
 	}

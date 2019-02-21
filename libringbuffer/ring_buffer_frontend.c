@@ -941,7 +941,7 @@ static void channel_free(struct channel *chan,
 	channel_backend_free(&chan->backend, handle);
 	/* chan is freed by shm teardown */
 	shm_object_table_destroy(handle->table, consumer);
-	free(handle);
+	lttng_ust_free(handle);
 }
 
 /**
@@ -1011,7 +1011,7 @@ struct lttng_ust_shm_handle *channel_create(const struct lttng_ust_lib_ring_buff
 					 read_timer_interval))
 		return NULL;
 
-	handle = zmalloc(sizeof(struct lttng_ust_shm_handle));
+	handle = lttng_ust_zmalloc(sizeof(struct lttng_ust_shm_handle));
 	if (!handle)
 		return NULL;
 
@@ -1082,7 +1082,7 @@ error_backend_init:
 error_append:
 	shm_object_table_destroy(handle->table, 1);
 error_table_alloc:
-	free(handle);
+	lttng_ust_free(handle);
 	return NULL;
 }
 
@@ -1093,7 +1093,7 @@ struct lttng_ust_shm_handle *channel_handle_create(void *data,
 	struct lttng_ust_shm_handle *handle;
 	struct shm_object *object;
 
-	handle = zmalloc(sizeof(struct lttng_ust_shm_handle));
+	handle = lttng_ust_zmalloc(sizeof(struct lttng_ust_shm_handle));
 	if (!handle)
 		return NULL;
 
@@ -1114,7 +1114,7 @@ struct lttng_ust_shm_handle *channel_handle_create(void *data,
 error_table_object:
 	shm_object_table_destroy(handle->table, 0);
 error_table_alloc:
-	free(handle);
+	lttng_ust_free(handle);
 	return NULL;
 }
 

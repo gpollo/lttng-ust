@@ -2245,3 +2245,27 @@ void ustctl_exit(void)
 	lttng_ring_buffer_client_overwrite_exit();
 	lttng_ring_buffer_metadata_client_exit();
 }
+
+/*
+ * Since liblttng-ust-ctl.so doesn't include lttng-ust's malloc implementation,
+ * we provide our own functions for the linked based on libc's implementation.
+ */
+void lttng_ust_free(void *p)
+{
+	free(p);
+}
+
+void *lttng_ust_malloc(size_t len)
+{
+	return malloc(len);
+}
+
+void *lttng_ust_calloc(size_t n, size_t elem_size)
+{
+	return calloc(n, elem_size);
+}
+
+void *lttng_ust_realloc(void *p, size_t len)
+{
+	return realloc(p, len);
+}

@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <lttng/ust-elf.h>
+#include <lttng/ust-malloc.h>
 #include "tap.h"
 
 #define NUM_ARCH 4
@@ -111,8 +112,8 @@ void test_elf(const char *test_dir, const char *arch, uint64_t exp_memsz,
 		"debug link crc - expected: %#x, got: %#x",
 		exp_crc, crc);
 
-	free(build_id);
-	free(dbg_file);
+	lttng_ust_free(build_id);
+	lttng_ust_free(dbg_file);
 	lttng_ust_elf_destroy(elf);
 }
 
