@@ -151,6 +151,16 @@ struct callsite_entry {
 	bool tp_entry_callsite_ref; /* Has a tp_entry took a ref on this callsite */
 };
 
+void lttng_ust_tracepoint_lock(void)
+{
+	pthread_mutex_lock(&tracepoint_mutex);
+}
+
+void lttng_ust_tracepoint_unlock(void)
+{
+	pthread_mutex_unlock(&tracepoint_mutex);
+}
+
 /* coverity[+alloc] */
 static void *allocate_probes(int count)
 {
@@ -626,7 +636,7 @@ int __tracepoint_probe_register(const char *name, void (*probe)(void),
 
 	DBG("Registering probe to tracepoint %s", name);
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	old = tracepoint_add_probe(name, probe, data, signature);
 	if (IS_ERR(old)) {
 		ret = PTR_ERR(old);
@@ -636,7 +646,7 @@ int __tracepoint_probe_register(const char *name, void (*probe)(void),
 	tracepoint_sync_callsites(name);
 	release_probes(old);
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 	return ret;
 }
 
@@ -653,7 +663,7 @@ int __tracepoint_probe_register_queue_release(const char *name,
 
 	DBG("Registering probe to tracepoint %s. Queuing release.", name);
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	old = tracepoint_add_probe(name, probe, data, signature);
 	if (IS_ERR(old)) {
 		ret = PTR_ERR(old);
@@ -663,7 +673,7 @@ int __tracepoint_probe_register_queue_release(const char *name,
 	tracepoint_sync_callsites(name);
 	tracepoint_release_queue_add_old_probes(old);
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 	return ret;
 }
 
@@ -698,7 +708,7 @@ int __tracepoint_probe_unregister(const char *name, void (*probe)(void),
 
 	DBG("Un-registering probe from tracepoint %s", name);
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	old = tracepoint_remove_probe(name, probe, data);
 	if (IS_ERR(old)) {
 		ret = PTR_ERR(old);
@@ -707,7 +717,7 @@ int __tracepoint_probe_unregister(const char *name, void (*probe)(void),
 	tracepoint_sync_callsites(name);
 	release_probes(old);
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 	return ret;
 }
 
@@ -724,7 +734,7 @@ int __tracepoint_probe_unregister_queue_release(const char *name,
 
 	DBG("Un-registering probe from tracepoint %s. Queuing release.", name);
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	old = tracepoint_remove_probe(name, probe, data);
 	if (IS_ERR(old)) {
 		ret = PTR_ERR(old);
@@ -733,7 +743,7 @@ int __tracepoint_probe_unregister_queue_release(const char *name,
 	tracepoint_sync_callsites(name);
 	tracepoint_release_queue_add_old_probes(old);
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 	return ret;
 }
 
@@ -744,7 +754,7 @@ void __tracepoint_probe_prune_release_queue(void)
 
 	DBG("Release queue of unregistered tracepoint probes.");
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	if (!release_queue_need_update)
 		goto end;
 	if (!cds_list_empty(&release_queue))
@@ -759,7 +769,7 @@ void __tracepoint_probe_prune_release_queue(void)
 		lttng_ust_free(pos);
 	}
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 }
 
 static void tracepoint_add_old_probes(void *old)
@@ -785,7 +795,7 @@ int tracepoint_probe_register_noupdate(const char *name, void (*probe)(void),
 	void *old;
 	int ret = 0;
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	old = tracepoint_add_probe(name, probe, data, signature);
 	if (IS_ERR(old)) {
 		ret = PTR_ERR(old);
@@ -793,7 +803,7 @@ int tracepoint_probe_register_noupdate(const char *name, void (*probe)(void),
 	}
 	tracepoint_add_old_probes(old);
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 	return ret;
 }
 
@@ -813,7 +823,7 @@ int tracepoint_probe_unregister_noupdate(const char *name, void (*probe)(void),
 
 	DBG("Un-registering probe from tracepoint %s", name);
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	old = tracepoint_remove_probe(name, probe, data);
 	if (IS_ERR(old)) {
 		ret = PTR_ERR(old);
@@ -821,7 +831,7 @@ int tracepoint_probe_unregister_noupdate(const char *name, void (*probe)(void),
 	}
 	tracepoint_add_old_probes(old);
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 	return ret;
 }
 
@@ -833,7 +843,7 @@ void tracepoint_probe_update_all(void)
 	CDS_LIST_HEAD(release_probes);
 	struct tp_probes *pos, *next;
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	if (!need_update) {
 		goto end;
 	}
@@ -849,7 +859,7 @@ void tracepoint_probe_update_all(void)
 		lttng_ust_free(pos);
 	}
 end:
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 }
 
 void tracepoint_set_new_tracepoint_cb(void (*cb)(struct lttng_ust_tracepoint *))
@@ -877,8 +887,10 @@ int tracepoint_register_lib(struct lttng_ust_tracepoint * const *tracepoints_sta
 
 	init_tracepoint();
 
+	lttng_ust_tracepoint_lock();
 	pl = (struct tracepoint_lib *) lttng_ust_zmalloc(sizeof(struct tracepoint_lib));
 	if (!pl) {
+		lttng_ust_tracepoint_unlock();
 		PERROR("Unable to register tracepoint lib");
 		return -1;
 	}
@@ -886,7 +898,6 @@ int tracepoint_register_lib(struct lttng_ust_tracepoint * const *tracepoints_sta
 	pl->tracepoints_count = tracepoints_count;
 	CDS_INIT_LIST_HEAD(&pl->callsites);
 
-	pthread_mutex_lock(&tracepoint_mutex);
 	/*
 	 * We sort the libs by struct lib pointer address.
 	 */
@@ -904,7 +915,7 @@ lib_added:
 	new_tracepoints(tracepoints_start, tracepoints_start + tracepoints_count);
 	lib_register_callsites(pl);
 	lib_update_tracepoints(pl);
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 
 	DBG("just registered a tracepoints section from %p and having %d tracepoints",
 		tracepoints_start, tracepoints_count);
@@ -923,7 +934,7 @@ int tracepoint_unregister_lib(struct lttng_ust_tracepoint * const *tracepoints_s
 {
 	struct tracepoint_lib *lib;
 
-	pthread_mutex_lock(&tracepoint_mutex);
+	lttng_ust_tracepoint_lock();
 	cds_list_for_each_entry(lib, &libs, list) {
 		if (lib->tracepoints_start != tracepoints_start)
 			continue;
@@ -941,7 +952,7 @@ int tracepoint_unregister_lib(struct lttng_ust_tracepoint * const *tracepoints_s
 		lttng_ust_free(lib);
 		break;
 	}
-	pthread_mutex_unlock(&tracepoint_mutex);
+	lttng_ust_tracepoint_unlock();
 	return 0;
 }
 

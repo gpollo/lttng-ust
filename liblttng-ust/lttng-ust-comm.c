@@ -2097,6 +2097,9 @@ void ust_before_fork(sigset_t *save_sigset)
 	pthread_mutex_lock(&ust_fork_mutex);
 
 	ust_lock_nocheck();
+
+	lttng_ust_tracepoint_lock();
+
 	urcu_bp_before_fork();
 }
 
@@ -2105,6 +2108,9 @@ static void ust_after_fork_common(sigset_t *restore_sigset)
 	int ret;
 
 	DBG("process %d", getpid());
+
+	lttng_ust_tracepoint_unlock();
+
 	ust_unlock();
 
 	pthread_mutex_unlock(&ust_fork_mutex);
