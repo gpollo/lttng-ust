@@ -121,6 +121,30 @@ static int lttng_ust_comm_should_quit;
 int lttng_ust_loaded __attribute__((weak));
 
 /*
+ * We only want to register atfork handlers once per application. We can't
+ * re-register the handlers inside the handler themselves since it would cause
+ * a deadlock inside glibc.
+ */
+static int atfork_registered = 0;
+
+static sigset_t atfork_sigset;
+
+static void atfork_prepare(void)
+{
+	ust_before_fork(&atfork_sigset);
+}
+
+static void atfork_parent(void)
+{
+	ust_after_fork_parent(&atfork_sigset);
+}
+
+static void atfork_child(void)
+{
+	ust_after_fork_child(&atfork_sigset);
+}
+
+/*
  * Return 0 on success, -1 if should quit.
  * The lock is taken in both cases.
  * Signal-safe.
@@ -1829,6 +1853,15 @@ void __attribute__((constructor)) lttng_ust_init(void)
 	 * Invoke ust malloc wrapper init before starting other threads.
 	 */
 	lttng_ust_malloc_wrapper_init();
+
+	if (!atfork_registered) {
+		ret = pthread_atfork(atfork_prepare, atfork_parent, atfork_child);
+		if (ret) {
+			DBG("pthread_atfork returned %d", ret);
+		} else {
+			atfork_registered = 1;
+		}
+	}
 
 	timeout_mode = get_constructor_timeout(&constructor_timeout);
 
