@@ -23,6 +23,8 @@
 #ifndef MALLOC_280_H
 #define MALLOC_280_H
 
+#include <lttng/ust-malloc-config.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
