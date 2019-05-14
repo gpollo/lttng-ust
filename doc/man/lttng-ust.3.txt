@@ -744,6 +744,25 @@ library before you start the application. Typical use cases include
 daemons closing all file descriptors after man:fork(2), and buggy
 applications doing ``double-closes''.
 
+Using LTTng-UST with applications that change effective user ID
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If LTTng traces your application using per-UID buffers (see the
+nloption:--buffers-uid option of man:lttng-enable-channel(1)) and changes
+the process's effective user ID with man:setuid(2), the library
+`liblttng-ust-setuid.so` needs to be preloaded before starting the
+application with the `LD_PRELOAD` environment variable (see man:ld.so(8)).
+This way, event records generated after the user ID change are forwarded to
+the correct buffer.
+
+This workaround requires that the tracing session be global (created by a
+root session daemon; see man:lttng-sessiond(1)) to avoid permission problems
+of a session daemon started by another user.
+
+That said, if your application has the `CAP_SETUID` capability or the SUID bit,
+the dynamic linker will ignore libraries in `LD_PRELOAD` if they aren't in the
+standard search directories and don't have the SUID bit too (see man:ld.so(8)).
+The install script of LTTng-UST will not set the SUID bit to
+`liblttng-ust-setuid.so` for security reason.
 
 Context information
 ~~~~~~~~~~~~~~~~~~~

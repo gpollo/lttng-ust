@@ -5,6 +5,7 @@ SUBDIRS = . include snprintf libringbuffer liblttng-ust-comm \
 		liblttng-ust-ctl \
 		liblttng-ust-fd \
 		liblttng-ust-fork \
+		liblttng-ust-setuid \
 		liblttng-ust-libc-wrapper \
 		liblttng-ust-cyg-profile \
 		tools

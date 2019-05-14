@@ -522,6 +522,7 @@ AC_CONFIG_FILES([
 	liblttng-ust/Makefile
 	liblttng-ust-ctl/Makefile
 	liblttng-ust-fork/Makefile
+	liblttng-ust-setuid/Makefile
 	liblttng-ust-dl/Makefile
 	liblttng-ust-fd/Makefile
 	liblttng-ust-java/Makefile

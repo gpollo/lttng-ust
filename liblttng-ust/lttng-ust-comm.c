@@ -225,10 +225,12 @@ void ust_unlock(void)
  *   daemon problems).
  */
 static sem_t constructor_wait;
+
 /*
  * Doing this for both the global and local sessiond.
  */
-static int sem_count = { 2 };
+enum { LTTNG_UST_INIT_SEM_COUNT = 2 };
+static int sem_count = LTTNG_UST_INIT_SEM_COUNT;
 
 /*
  * Counting nesting within lttng-ust. Used to ensure that calling fork()
@@ -1922,7 +1924,7 @@ void lttng_ust_cleanup(int exiting)
 	exit_tracepoint();
 	if (!exiting) {
 		/* Reinitialize values for fork */
-		sem_count = 2;
+		sem_count = LTTNG_UST_INIT_SEM_COUNT;
 		lttng_ust_comm_should_quit = 0;
 		initialized = 0;
 	}
@@ -2071,4 +2073,27 @@ void lttng_ust_sockinfo_session_enabled(void *owner)
 {
 	struct sock_info *sock_info = owner;
 	sock_info->statedump_pending = 1;
+}
+
+/*
+ * Re-register the application when changing user ID. This is especially
+ * important for per-UID buffers. It is not strictly needed for per-PID
+ * buffers, but a slight extra overhead when changing user ID is considered
+ * harmless for a relatively infrequent operation.
+ */
+void ust_after_setuid(void)
+{
+	DBG("Unregistering the process");
+	lttng_ust_fixup_tls();
+	lttng_ust_exit();
+
+	sem_count = LTTNG_UST_INIT_SEM_COUNT;
+	lttng_ust_comm_should_quit = 0;
+	initialized = 0;
+
+	global_apps.wait_shm_mmap = NULL;
+	local_apps.wait_shm_mmap = NULL;
+
+	DBG("Registering the process under new UID=%u", getuid());
+	lttng_ust_init();
 }
