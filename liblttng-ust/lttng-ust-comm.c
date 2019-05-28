@@ -135,7 +135,9 @@ int ust_lock(void)
 		ERR("pthread_setcancelstate: %s", strerror(ret));
 	}
 	if (oldstate != PTHREAD_CANCEL_ENABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
+		if (!URCU_TLS(ust_mutex_nest)) {
+			ERR("pthread_setcancelstate: unexpected oldstate");
+		}
 	}
 	sigfillset(&sig_all_blocked);
 	ret = pthread_sigmask(SIG_SETMASK, &sig_all_blocked, &orig_mask);
@@ -171,7 +173,9 @@ void ust_lock_nocheck(void)
 		ERR("pthread_setcancelstate: %s", strerror(ret));
 	}
 	if (oldstate != PTHREAD_CANCEL_ENABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
+		if (!URCU_TLS(ust_mutex_nest)) {
+			ERR("pthread_setcancelstate: unexpected oldstate");
+		}
 	}
 	sigfillset(&sig_all_blocked);
 	ret = pthread_sigmask(SIG_SETMASK, &sig_all_blocked, &orig_mask);
@@ -210,7 +214,9 @@ void ust_unlock(void)
 		ERR("pthread_setcancelstate: %s", strerror(ret));
 	}
 	if (oldstate != PTHREAD_CANCEL_DISABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
+		if (URCU_TLS(ust_mutex_nest)) {
+			ERR("pthread_setcancelstate: unexpected oldstate");
+		}
 	}
 }
 
