@@ -1926,10 +1926,29 @@ void lttng_ust_cleanup(int exiting)
 	}
 }
 
-void __attribute__((destructor)) lttng_ust_exit(void)
+static
+void stop_listener_thread(struct sock_info* info)
 {
 	int ret;
 
+	pthread_mutex_lock(&ust_exit_mutex);
+	if (!info->thread_active) {
+		goto exit;
+	}
+
+	ret = pthread_cancel(info->ust_listener);
+	if (ret) {
+		ERR("Error cancelling %s ust listener thread: %s", info->name, strerror(ret));
+	}
+
+	info->thread_active = 0;
+
+exit:
+	pthread_mutex_unlock(&ust_exit_mutex);
+}
+
+void __attribute__((destructor)) lttng_ust_exit(void)
+{
 	/*
 	 * Using pthread_cancel here because:
 	 * A) we don't want to hang application teardown.
@@ -1945,27 +1964,9 @@ void __attribute__((destructor)) lttng_ust_exit(void)
 	lttng_ust_comm_should_quit = 1;
 	ust_unlock();
 
-	pthread_mutex_lock(&ust_exit_mutex);
-	/* cancel threads */
-	if (global_apps.thread_active) {
-		ret = pthread_cancel(global_apps.ust_listener);
-		if (ret) {
-			ERR("Error cancelling global ust listener thread: %s",
-				strerror(ret));
-		} else {
-			global_apps.thread_active = 0;
-		}
-	}
-	if (local_apps.thread_active) {
-		ret = pthread_cancel(local_apps.ust_listener);
-		if (ret) {
-			ERR("Error cancelling local ust listener thread: %s",
-				strerror(ret));
-		} else {
-			local_apps.thread_active = 0;
-		}
-	}
-	pthread_mutex_unlock(&ust_exit_mutex);
+	/* stop threads */
+	stop_listener_thread(&global_apps);
+	stop_listener_thread(&local_apps);
 
 	/*
 	 * Do NOT join threads: use of sys_futex makes it impossible to
