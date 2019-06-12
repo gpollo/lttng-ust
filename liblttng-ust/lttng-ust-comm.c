@@ -88,8 +88,7 @@ static int initialized;
  * it is taken within the library constructor.
  */
 static pthread_mutex_t ust_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/* Allow nesting the ust_mutex within the same thread. */
+static DEFINE_URCU_TLS(int, ust_mutex_oldstate);
 static DEFINE_URCU_TLS(int, ust_mutex_nest);
 
 /*
@@ -108,6 +107,7 @@ static pthread_mutex_t ust_exit_mutex = PTHREAD_MUTEX_INITIALIZER;
  * the dynamic loader lock.
  */
 static pthread_mutex_t ust_fork_mutex = PTHREAD_MUTEX_INITIALIZER;
+static DEFINE_URCU_TLS(int, ust_fork_mutex_oldstate);
 
 /* Should the ust comm thread quit ? */
 static int lttng_ust_comm_should_quit;
@@ -120,34 +120,62 @@ static int lttng_ust_comm_should_quit;
  */
 int lttng_ust_loaded __attribute__((weak));
 
-/*
- * Return 0 on success, -1 if should quit.
- * The lock is taken in both cases.
- * Signal-safe.
- */
+static
+void ust_exit_lock(void)
+{
+	errno = pthread_mutex_lock(&ust_exit_mutex);
+	if (errno) {
+		PERROR("pthread_mutex_lock");
+	}
+}
+
+static
+void ust_exit_unlock(void)
+{
+	errno = pthread_mutex_unlock(&ust_exit_mutex);
+	if (errno) {
+		PERROR("pthread_mutex_unlock");
+	}
+}
+
+static
+void ust_fork_lock(void)
+{
+	int oldstate;
+
+	errno = pthread_mutex_lock(&ust_fork_mutex);
+	if (errno) {
+		PERROR("pthread_mutex_lock");
+	}
+
+	errno = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+	if (errno) {
+		PERROR("pthread_setcancelstate");
+	}
+	URCU_TLS(ust_fork_mutex_oldstate) = oldstate;
+}
+
+static
+void ust_fork_unlock(void)
+{
+	int oldstate;
+
+	oldstate = URCU_TLS(ust_fork_mutex_oldstate);
+	errno = pthread_setcancelstate(oldstate, NULL);
+	if (errno) {
+		PERROR("pthread_setcancelstate");
+	}
+
+	errno = pthread_mutex_unlock(&ust_fork_mutex);
+	if (errno) {
+		PERROR("pthread_mutex_unlock");
+	}
+}
+
 int ust_lock(void)
 {
-	sigset_t sig_all_blocked, orig_mask;
-	int ret, oldstate;
+	ust_lock_nocheck();
 
-	ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
-	if (ret) {
-		ERR("pthread_setcancelstate: %s", strerror(ret));
-	}
-	if (oldstate != PTHREAD_CANCEL_ENABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
-	}
-	sigfillset(&sig_all_blocked);
-	ret = pthread_sigmask(SIG_SETMASK, &sig_all_blocked, &orig_mask);
-	if (ret) {
-		ERR("pthread_sigmask: %s", strerror(ret));
-	}
-	if (!URCU_TLS(ust_mutex_nest)++)
-		pthread_mutex_lock(&ust_mutex);
-	ret = pthread_sigmask(SIG_SETMASK, &orig_mask, NULL);
-	if (ret) {
-		ERR("pthread_sigmask: %s", strerror(ret));
-	}
 	if (lttng_ust_comm_should_quit) {
 		return -1;
 	} else {
@@ -159,58 +187,44 @@ int ust_lock(void)
  * ust_lock_nocheck() can be used in constructors/destructors, because
  * they are already nested within the dynamic loader lock, and therefore
  * have exclusive access against execution of liblttng-ust destructor.
- * Signal-safe.
  */
 void ust_lock_nocheck(void)
 {
-	sigset_t sig_all_blocked, orig_mask;
-	int ret, oldstate;
+	int oldstate;
 
-	ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
-	if (ret) {
-		ERR("pthread_setcancelstate: %s", strerror(ret));
+	if (URCU_TLS(ust_mutex_nest)++) {
+		return;
 	}
-	if (oldstate != PTHREAD_CANCEL_ENABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
+
+	errno = pthread_mutex_lock(&ust_mutex);
+	if (errno) {
+		PERROR("pthread_mutex_lock");
 	}
-	sigfillset(&sig_all_blocked);
-	ret = pthread_sigmask(SIG_SETMASK, &sig_all_blocked, &orig_mask);
-	if (ret) {
-		ERR("pthread_sigmask: %s", strerror(ret));
+
+	errno = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+	if (errno) {
+		PERROR("pthread_setcancelstate");
 	}
-	if (!URCU_TLS(ust_mutex_nest)++)
-		pthread_mutex_lock(&ust_mutex);
-	ret = pthread_sigmask(SIG_SETMASK, &orig_mask, NULL);
-	if (ret) {
-		ERR("pthread_sigmask: %s", strerror(ret));
-	}
+	URCU_TLS(ust_mutex_oldstate) = oldstate;
 }
 
-/*
- * Signal-safe.
- */
 void ust_unlock(void)
 {
-	sigset_t sig_all_blocked, orig_mask;
-	int ret, oldstate;
+	int oldstate;
 
-	sigfillset(&sig_all_blocked);
-	ret = pthread_sigmask(SIG_SETMASK, &sig_all_blocked, &orig_mask);
-	if (ret) {
-		ERR("pthread_sigmask: %s", strerror(ret));
+	if (--URCU_TLS(ust_mutex_nest)) {
+		return;
 	}
-	if (!--URCU_TLS(ust_mutex_nest))
-		pthread_mutex_unlock(&ust_mutex);
-	ret = pthread_sigmask(SIG_SETMASK, &orig_mask, NULL);
-	if (ret) {
-		ERR("pthread_sigmask: %s", strerror(ret));
+
+	oldstate = URCU_TLS(ust_mutex_oldstate);
+	errno = pthread_setcancelstate(oldstate, NULL);
+	if (errno) {
+		PERROR("pthread_setcancelstate");
 	}
-	ret = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &oldstate);
-	if (ret) {
-		ERR("pthread_setcancelstate: %s", strerror(ret));
-	}
-	if (oldstate != PTHREAD_CANCEL_DISABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
+
+	errno = pthread_mutex_unlock(&ust_mutex);
+	if (errno) {
+		PERROR("pthread_mutex_unlock");
 	}
 }
 
@@ -398,9 +412,16 @@ void lttng_fixup_nest_count_tls(void)
 }
 
 static
-void lttng_fixup_ust_mutex_nest_tls(void)
+void lttng_fixup_ust_mutex_tls(void)
 {
+	asm volatile ("" : : "m" (URCU_TLS(ust_mutex_oldstate)));
 	asm volatile ("" : : "m" (URCU_TLS(ust_mutex_nest)));
+}
+
+static
+void lttng_fixup_ust_fork_mutex_tls(void)
+{
+	asm volatile ("" : : "m" (URCU_TLS(ust_fork_mutex_oldstate)));
 }
 
 /*
@@ -420,7 +441,8 @@ void lttng_ust_fixup_tls(void)
 	lttng_fixup_vtid_tls();
 	lttng_fixup_nest_count_tls();
 	lttng_fixup_procname_tls();
-	lttng_fixup_ust_mutex_nest_tls();
+	lttng_fixup_ust_mutex_tls();
+	lttng_fixup_ust_fork_mutex_tls();
 	lttng_ust_fixup_fd_tracker_tls();
 }
 
@@ -701,9 +723,9 @@ void handle_pending_statedump(struct sock_info *sock_info)
 {
 	if (sock_info->registration_done && sock_info->statedump_pending) {
 		sock_info->statedump_pending = 0;
-		pthread_mutex_lock(&ust_fork_mutex);
+		ust_fork_lock();
 		lttng_handle_pending_statedump(sock_info);
-		pthread_mutex_unlock(&ust_fork_mutex);
+		ust_fork_unlock();
 
 		if (!sock_info->initial_statedump_done) {
 			sock_info->initial_statedump_done = 1;
@@ -1747,9 +1769,9 @@ end:
 quit:
 	ust_unlock();
 
-	pthread_mutex_lock(&ust_exit_mutex);
+	ust_exit_lock();
 	sock_info->thread_active = 0;
-	pthread_mutex_unlock(&ust_exit_mutex);
+	ust_exit_unlock();
 	return NULL;
 }
 
@@ -1763,13 +1785,13 @@ void start_listener_thread(struct sock_info* info, pthread_attr_t *thread_attr)
 		return;
 	}
 
-	pthread_mutex_lock(&ust_exit_mutex);
+	ust_exit_lock();
 	ret = pthread_create(&info->ust_listener, thread_attr, ust_listener_thread, info);
 	if (ret) {
 		ERR("pthread_create %s: %s", info->name, strerror(ret));
 	}
 	info->thread_active = 1;
-	pthread_mutex_unlock(&ust_exit_mutex);
+	ust_exit_unlock();
 }
 
 /*
@@ -1982,7 +2004,7 @@ void stop_listener_thread(struct sock_info *info)
 {
 	int ret;
 
-	pthread_mutex_lock(&ust_exit_mutex);
+	ust_exit_lock();
 	if (!info->thread_active) {
 		goto exit;
 	}
@@ -1994,7 +2016,7 @@ void stop_listener_thread(struct sock_info *info)
 
 	info->thread_active = 0;
 exit:
-	pthread_mutex_unlock(&ust_exit_mutex);
+	ust_exit_unlock();
 }
 
 void __attribute__((destructor)) lttng_ust_exit(void)
@@ -2058,7 +2080,7 @@ void ust_before_fork(sigset_t *save_sigset)
 		PERROR("sigprocmask");
 	}
 
-	pthread_mutex_lock(&ust_fork_mutex);
+	ust_fork_lock();
 
 	ust_lock_nocheck();
 	urcu_bp_before_fork();
@@ -2071,7 +2093,7 @@ static void ust_after_fork_common(sigset_t *restore_sigset)
 	DBG("process %d", getpid());
 	ust_unlock();
 
-	pthread_mutex_unlock(&ust_fork_mutex);
+	ust_fork_unlock();
 
 	/* Restore signals */
 	ret = sigprocmask(SIG_SETMASK, restore_sigset, NULL);
