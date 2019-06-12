@@ -1702,6 +1702,25 @@ quit:
 	return NULL;
 }
 
+static
+void start_listener_thread(struct sock_info* info, pthread_attr_t* thread_attr)
+{
+	int ret;
+
+	if (!info->allowed) {
+		handle_register_done(info);
+		return;
+	}
+
+	pthread_mutex_lock(&ust_exit_mutex);
+	ret = pthread_create(&info->ust_listener, thread_attr, ust_listener_thread, info);
+	if (ret) {
+		ERR("pthread_create %s: %s", info->name, strerror(ret));
+	}
+	info->thread_active = 1;
+	pthread_mutex_unlock(&ust_exit_mutex);
+}
+
 /*
  * Weak symbol to call when the ust malloc wrapper is not loaded.
  */
@@ -1815,36 +1834,15 @@ void __attribute__((constructor)) lttng_ust_init(void)
 	if (ret) {
 		ERR("pthread_attr_init: %s", strerror(ret));
 	}
+
 	ret = pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED);
 	if (ret) {
 		ERR("pthread_attr_setdetachstate: %s", strerror(ret));
 	}
 
-	if (global_apps.allowed) {
-		pthread_mutex_lock(&ust_exit_mutex);
-		ret = pthread_create(&global_apps.ust_listener, &thread_attr,
-				ust_listener_thread, &global_apps);
-		if (ret) {
-			ERR("pthread_create global: %s", strerror(ret));
-		}
-		global_apps.thread_active = 1;
-		pthread_mutex_unlock(&ust_exit_mutex);
-	} else {
-		handle_register_done(&global_apps);
-	}
+	start_listener_thread(&global_apps, &thread_attr);
+	start_listener_thread(&local_apps, &thread_attr);
 
-	if (local_apps.allowed) {
-		pthread_mutex_lock(&ust_exit_mutex);
-		ret = pthread_create(&local_apps.ust_listener, &thread_attr,
-				ust_listener_thread, &local_apps);
-		if (ret) {
-			ERR("pthread_create local: %s", strerror(ret));
-		}
-		local_apps.thread_active = 1;
-		pthread_mutex_unlock(&ust_exit_mutex);
-	} else {
-		handle_register_done(&local_apps);
-	}
 	ret = pthread_attr_destroy(&thread_attr);
 	if (ret) {
 		ERR("pthread_attr_destroy: %s", strerror(ret));
