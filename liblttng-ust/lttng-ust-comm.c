@@ -1753,6 +1753,25 @@ quit:
 	return NULL;
 }
 
+static
+void start_listener_thread(struct sock_info* info, pthread_attr_t *thread_attr)
+{
+	int ret;
+
+	if (!info->allowed) {
+		handle_register_done(info);
+		return;
+	}
+
+	pthread_mutex_lock(&ust_exit_mutex);
+	ret = pthread_create(&info->ust_listener, thread_attr, ust_listener_thread, info);
+	if (ret) {
+		ERR("pthread_create %s: %s", info->name, strerror(ret));
+	}
+	info->thread_active = 1;
+	pthread_mutex_unlock(&ust_exit_mutex);
+}
+
 /*
  * Weak symbol to call when the ust malloc wrapper is not loaded.
  */
@@ -1866,36 +1885,15 @@ void __attribute__((constructor)) lttng_ust_init(void)
 	if (ret) {
 		ERR("pthread_attr_init: %s", strerror(ret));
 	}
+
 	ret = pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED);
 	if (ret) {
 		ERR("pthread_attr_setdetachstate: %s", strerror(ret));
 	}
 
-	if (global_apps.allowed) {
-		pthread_mutex_lock(&ust_exit_mutex);
-		ret = pthread_create(&global_apps.ust_listener, &thread_attr,
-				ust_listener_thread, &global_apps);
-		if (ret) {
-			ERR("pthread_create global: %s", strerror(ret));
-		}
-		global_apps.thread_active = 1;
-		pthread_mutex_unlock(&ust_exit_mutex);
-	} else {
-		handle_register_done(&global_apps);
-	}
+	start_listener_thread(&global_apps, &thread_attr);
+	start_listener_thread(&local_apps, &thread_attr);
 
-	if (local_apps.allowed) {
-		pthread_mutex_lock(&ust_exit_mutex);
-		ret = pthread_create(&local_apps.ust_listener, &thread_attr,
-				ust_listener_thread, &local_apps);
-		if (ret) {
-			ERR("pthread_create local: %s", strerror(ret));
-		}
-		local_apps.thread_active = 1;
-		pthread_mutex_unlock(&ust_exit_mutex);
-	} else {
-		handle_register_done(&local_apps);
-	}
 	ret = pthread_attr_destroy(&thread_attr);
 	if (ret) {
 		ERR("pthread_attr_destroy: %s", strerror(ret));
@@ -1979,10 +1977,28 @@ void lttng_ust_cleanup(int exiting)
 	}
 }
 
-void __attribute__((destructor)) lttng_ust_exit(void)
+static
+void stop_listener_thread(struct sock_info *info)
 {
 	int ret;
 
+	pthread_mutex_lock(&ust_exit_mutex);
+	if (!info->thread_active) {
+		goto exit;
+	}
+
+	ret = pthread_cancel(info->ust_listener);
+	if (ret) {
+		ERR("pthread_cancel %s: %s", info->name, strerror(ret));
+	}
+
+	info->thread_active = 0;
+exit:
+	pthread_mutex_unlock(&ust_exit_mutex);
+}
+
+void __attribute__((destructor)) lttng_ust_exit(void)
+{
 	/*
 	 * Using pthread_cancel here because:
 	 * A) we don't want to hang application teardown.
@@ -1998,27 +2014,8 @@ void __attribute__((destructor)) lttng_ust_exit(void)
 	lttng_ust_comm_should_quit = 1;
 	ust_unlock();
 
-	pthread_mutex_lock(&ust_exit_mutex);
-	/* cancel threads */
-	if (global_apps.thread_active) {
-		ret = pthread_cancel(global_apps.ust_listener);
-		if (ret) {
-			ERR("Error cancelling global ust listener thread: %s",
-				strerror(ret));
-		} else {
-			global_apps.thread_active = 0;
-		}
-	}
-	if (local_apps.thread_active) {
-		ret = pthread_cancel(local_apps.ust_listener);
-		if (ret) {
-			ERR("Error cancelling local ust listener thread: %s",
-				strerror(ret));
-		} else {
-			local_apps.thread_active = 0;
-		}
-	}
-	pthread_mutex_unlock(&ust_exit_mutex);
+	stop_listener_thread(&global_apps);
+	stop_listener_thread(&local_apps);
 
 	/*
 	 * Do NOT join threads: use of sys_futex makes it impossible to
