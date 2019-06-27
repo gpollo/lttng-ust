@@ -228,6 +228,36 @@ void ust_unlock(void)
 	}
 }
 
+static
+void disable_cancelstate(void)
+{
+	int oldstate;
+
+	errno = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+	if (errno) {
+		PERROR("pthread_setcancelstate");
+	}
+
+	if (oldstate != PTHREAD_CANCEL_ENABLE) {
+		ERR("pthread_setcancelstate: unexpected oldstate");
+	}
+}
+
+static
+void enable_cancelstate(void)
+{
+	int oldstate;
+
+	errno = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &oldstate);
+	if (errno) {
+		PERROR("pthread_setcancelstate");
+	}
+
+	if (oldstate != PTHREAD_CANCEL_DISABLE) {
+		ERR("pthread_setcancelstate: unexpected oldstate");
+	}
+}
+
 /*
  * Wait for either of these before continuing to the main
  * program:
@@ -275,6 +305,8 @@ struct sock_info {
 	/* Keep track of lazy state dump not performed yet. */
 	int statedump_pending;
 	int initial_statedump_done;
+
+	int receiving;
 };
 
 /* Socket from app (connect) to session daemon (listen) for communication */
@@ -295,6 +327,8 @@ struct sock_info global_apps = {
 
 	.statedump_pending = 0,
 	.initial_statedump_done = 0,
+
+	.receiving = 0,
 };
 
 /* TODO: allow global_apps_sock_path override */
@@ -312,6 +346,8 @@ struct sock_info local_apps = {
 
 	.statedump_pending = 0,
 	.initial_statedump_done = 0,
+
+	.receiving = 0,
 };
 
 static int wait_poll_fallback;
@@ -1159,6 +1195,7 @@ void cleanup_sock_info(struct sock_info *sock_info, int exiting)
 			ERR("Error closing ust cmd socket");
 		}
 		sock_info->socket = -1;
+		sock_info->receiving = 0;
 	}
 	if (sock_info->notify_socket != -1) {
 		ret = ustcomm_close_unix_sock(sock_info->notify_socket);
@@ -1491,6 +1528,14 @@ void *ust_listener_thread(void *arg)
 	long timeout;
 
 	lttng_ust_fixup_tls();
+
+	if (sock_info->receiving) {
+		if (ust_lock()) {
+			goto quit;
+		}
+		goto recv_loop;
+	}
+
 	/*
 	 * If available, add '-ust' to the end of this thread's
 	 * process name
@@ -1531,6 +1576,7 @@ restart:
 				sock_info->name);
 		}
 		sock_info->socket = -1;
+		sock_info->receiving = 0;
 	}
 	if (sock_info->notify_socket != -1) {
 		/* FD tracker is updated by ustcomm_close_unix_sock() */
@@ -1715,8 +1761,9 @@ restart:
 		ust_unlock();
 		goto restart;
 	}
+recv_loop:
 	sock = sock_info->socket;
-
+	sock_info->receiving = 1;
 	ust_unlock();
 
 	for (;;) {
@@ -1746,8 +1793,10 @@ restart:
 			goto end;
 		case sizeof(lum):
 			print_cmd(lum.cmd, lum.handle);
+			disable_cancelstate();
 			ret = handle_message(sock_info, sock, &lum);
 			if (ret) {
+				enable_cancelstate();
 				ERR("Error handling message for %s socket",
 					sock_info->name);
 				/*
@@ -1756,6 +1805,7 @@ restart:
 				 */
 				goto end;
 			}
+			enable_cancelstate();
 			continue;
 		default:
 			if (len < 0) {
@@ -1775,6 +1825,8 @@ end:
 	if (ust_lock()) {
 		goto quit;
 	}
+	sock_info->receiving = 0;
+
 	/* Cleanup socket handles before trying to reconnect */
 	lttng_ust_objd_table_owner_cleanup(sock_info);
 	ust_unlock();
@@ -2065,21 +2117,25 @@ void ust_before_fork(sigset_t *save_sigset)
 	sigset_t all_sigs;
 	int ret;
 
-	/* Fixup lttng-ust TLS. */
 	lttng_ust_fixup_tls();
-
-	if (URCU_TLS(lttng_ust_nest_count))
+	if (URCU_TLS(lttng_ust_nest_count)) {
 		return;
-	/* Disable signals */
+	}
+
 	sigfillset(&all_sigs);
 	ret = sigprocmask(SIG_BLOCK, &all_sigs, save_sigset);
 	if (ret == -1) {
 		PERROR("sigprocmask");
 	}
 
-	ust_fork_lock();
-
 	ust_lock_nocheck();
+	lttng_ust_comm_should_quit = 1;
+	ust_unlock();
+
+	stop_listener_thread(&global_apps);
+	stop_listener_thread(&local_apps);
+	lttng_ust_comm_should_quit = 0;
+
 	urcu_bp_before_fork();
 }
 
@@ -2087,12 +2143,6 @@ static void ust_after_fork_common(sigset_t *restore_sigset)
 {
 	int ret;
 
-	DBG("process %d", getpid());
-	ust_unlock();
-
-	ust_fork_unlock();
-
-	/* Restore signals */
 	ret = sigprocmask(SIG_SETMASK, restore_sigset, NULL);
 	if (ret == -1) {
 		PERROR("sigprocmask");
@@ -2101,35 +2151,34 @@ static void ust_after_fork_common(sigset_t *restore_sigset)
 
 void ust_after_fork_parent(sigset_t *restore_sigset)
 {
-	if (URCU_TLS(lttng_ust_nest_count))
+	if (URCU_TLS(lttng_ust_nest_count)) {
 		return;
+	}
+
 	DBG("process %d", getpid());
 	urcu_bp_after_fork_parent();
-	/* Release mutexes and reenable signals */
+
+	start_listener_thread(&global_apps);
+	start_listener_thread(&local_apps);
+
 	ust_after_fork_common(restore_sigset);
 }
 
-/*
- * After fork, in the child, we need to cleanup all the leftover state,
- * except the worker thread which already magically disappeared thanks
- * to the weird Linux fork semantics. After tyding up, we call
- * lttng_ust_init() again to start over as a new PID.
- *
- * This is meant for forks() that have tracing in the child between the
- * fork and following exec call (if there is any).
- */
 void ust_after_fork_child(sigset_t *restore_sigset)
 {
-	if (URCU_TLS(lttng_ust_nest_count))
+	if (URCU_TLS(lttng_ust_nest_count)) {
 		return;
+	}
+
 	lttng_context_vpid_reset();
 	lttng_context_vtid_reset();
 	lttng_context_procname_reset();
+
 	DBG("process %d", getpid());
-	/* Release urcu mutexes */
+
 	urcu_bp_after_fork_child();
+
 	lttng_ust_cleanup(0);
-	/* Release mutexes and reenable signals */
 	ust_after_fork_common(restore_sigset);
 	lttng_ust_init();
 }
