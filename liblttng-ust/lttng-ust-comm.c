@@ -1410,6 +1410,34 @@ error:
 }
 
 static
+void set_cancel_asynchronous(void)
+{
+	int oldtype;
+
+	errno = pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &oldtype);
+	if (errno) {
+		PERROR("pthread_setcanceltype");
+	}
+	if (oldtype != PTHREAD_CANCEL_DEFERRED) {
+		ERR("pthread_setcanceltype: unexpected old type");
+	}
+}
+
+static
+void set_cancel_deferred(void)
+{
+	int oldtype;
+
+	errno = pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, &oldtype);
+	if (errno) {
+		PERROR("pthread_setcanceltype");
+	}
+	if (oldtype != PTHREAD_CANCEL_ASYNCHRONOUS) {
+		ERR("pthread_setcanceltype: unexpected old type");
+	}
+}
+
+static
 void wait_for_sessiond(struct sock_info *sock_info)
 {
 	/* Use ust_lock to check if we should quit. */
@@ -1417,16 +1445,24 @@ void wait_for_sessiond(struct sock_info *sock_info)
 		goto quit;
 	}
 	if (wait_poll_fallback) {
-		goto error;
+		goto quit;
 	}
 	ust_unlock();
 
 	assert(sock_info->wait_shm_mmap);
-
 	DBG("Waiting for %s apps sessiond", sock_info->name);
+
 	/* Wait for futex wakeup */
-	if (uatomic_read((int32_t *) sock_info->wait_shm_mmap))
-		goto end_wait;
+	if (uatomic_read((int32_t *) sock_info->wait_shm_mmap)) {
+		goto skip_wait;
+	}
+
+	/*
+	 * Thread cancellability must set to asynchronous here to prevent
+	 * a potential deadlock when joining a thread that is a blocked on
+	 * a system call.
+	 */
+	set_cancel_asynchronous();
 
 	while (futex_async((int32_t *) sock_info->wait_shm_mmap,
 			FUTEX_WAIT, 0, NULL, NULL, 0)) {
@@ -1436,7 +1472,7 @@ void wait_for_sessiond(struct sock_info *sock_info)
 			goto end_wait;
 		case EINTR:
 			/* Retry if interrupted by signal. */
-			break;	/* Get out of switch. */
+			break;
 		case EFAULT:
 			wait_poll_fallback = 1;
 			DBG(
@@ -1445,19 +1481,16 @@ void wait_for_sessiond(struct sock_info *sock_info)
 "Please upgrade your kernel "
 "(fix is commit 9ea71503a8ed9184d2d0b8ccc4d269d05f7940ae in Linux kernel "
 "mainline). LTTng-UST will use polling mode fallback.");
-			if (ust_debug())
-				PERROR("futex");
+			PERROR("futex");
 			goto end_wait;
 		}
 	}
 end_wait:
+	set_cancel_deferred();
+skip_wait:
 	return;
 
 quit:
-	ust_unlock();
-	return;
-
-error:
 	ust_unlock();
 	return;
 }
@@ -1776,7 +1809,7 @@ quit:
 }
 
 static
-void start_listener_thread(struct sock_info* info, pthread_attr_t *thread_attr)
+void start_listener_thread(struct sock_info *info)
 {
 	int ret;
 
@@ -1786,7 +1819,7 @@ void start_listener_thread(struct sock_info* info, pthread_attr_t *thread_attr)
 	}
 
 	ust_exit_lock();
-	ret = pthread_create(&info->ust_listener, thread_attr, ust_listener_thread, info);
+	ret = pthread_create(&info->ust_listener, NULL, ust_listener_thread, info);
 	if (ret) {
 		ERR("pthread_create %s: %s", info->name, strerror(ret));
 	}
@@ -1810,7 +1843,6 @@ void __attribute__((constructor)) lttng_ust_init(void)
 {
 	struct timespec constructor_timeout;
 	sigset_t sig_all_blocked, orig_parent_mask;
-	pthread_attr_t thread_attr;
 	int timeout_mode;
 	int ret;
 	void *handle;
@@ -1903,23 +1935,8 @@ void __attribute__((constructor)) lttng_ust_init(void)
 		ERR("pthread_sigmask: %s", strerror(ret));
 	}
 
-	ret = pthread_attr_init(&thread_attr);
-	if (ret) {
-		ERR("pthread_attr_init: %s", strerror(ret));
-	}
-
-	ret = pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED);
-	if (ret) {
-		ERR("pthread_attr_setdetachstate: %s", strerror(ret));
-	}
-
-	start_listener_thread(&global_apps, &thread_attr);
-	start_listener_thread(&local_apps, &thread_attr);
-
-	ret = pthread_attr_destroy(&thread_attr);
-	if (ret) {
-		ERR("pthread_attr_destroy: %s", strerror(ret));
-	}
+	start_listener_thread(&global_apps);
+	start_listener_thread(&local_apps);
 
 	/* Restore original signal mask in parent */
 	ret = pthread_sigmask(SIG_SETMASK, &orig_parent_mask, NULL);
@@ -2013,7 +2030,14 @@ void stop_listener_thread(struct sock_info *info)
 	if (ret) {
 		ERR("pthread_cancel %s: %s", info->name, strerror(ret));
 	}
+	ust_exit_unlock();
 
+	ret = pthread_join(info->ust_listener, NULL);
+	if (ret) {
+		ERR("pthread_join %s: %s", info->name, strerror(ret));
+	}
+
+	ust_exit_lock();
 	info->thread_active = 0;
 exit:
 	ust_exit_unlock();
@@ -2039,14 +2063,6 @@ void __attribute__((destructor)) lttng_ust_exit(void)
 	stop_listener_thread(&global_apps);
 	stop_listener_thread(&local_apps);
 
-	/*
-	 * Do NOT join threads: use of sys_futex makes it impossible to
-	 * join the threads without using async-cancel, but async-cancel
-	 * is delivered by a signal, which could hit the target thread
-	 * anywhere in its code path, including while the ust_lock() is
-	 * held, causing a deadlock for the other thread. Let the OS
-	 * cleanup the threads if there are stalled in a syscall.
-	 */
 	lttng_ust_cleanup(1);
 }
 
