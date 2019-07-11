@@ -112,6 +112,9 @@ static DEFINE_URCU_TLS(int, ust_fork_mutex_oldstate);
 /* Should the ust comm thread quit ? */
 static int lttng_ust_comm_should_quit;
 
+static pthread_once_t atfork_register_once = PTHREAD_ONCE_INIT;
+static sigset_t atfork_sigset_save;
+
 /*
  * This variable can be tested by applications to check whether
  * lttng-ust is loaded. They simply have to define their own
@@ -1848,6 +1851,33 @@ void start_listener_thread(struct sock_info *info)
 	ust_exit_unlock();
 }
 
+static
+void atfork_before(void)
+{
+	ust_before_fork(&atfork_sigset_save);
+}
+
+static
+void atfork_after_parent(void)
+{
+	ust_after_fork_parent(&atfork_sigset_save);
+}
+
+static
+void atfork_after_child(void)
+{
+	ust_after_fork_child(&atfork_sigset_save);
+}
+
+static
+void atfork_register(void)
+{
+	errno = pthread_atfork(atfork_before, atfork_after_parent, atfork_after_child);
+	if (errno) {
+		PERROR("pthread_atfork");
+	}
+}
+
 /*
  * Weak symbol to call when the ust malloc wrapper is not loaded.
  */
@@ -1867,6 +1897,11 @@ void __attribute__((constructor)) lttng_ust_init(void)
 	int timeout_mode;
 	int ret;
 	void *handle;
+
+	ret = pthread_once(&atfork_register_once, atfork_register);
+	if (ret) {
+		ERR("pthread_once: %s", strerror(ret));
+	}
 
 	if (uatomic_xchg(&initialized, 1) == 1)
 		return;
