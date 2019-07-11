@@ -28,67 +28,6 @@
 
 #include <lttng/ust.h>
 
-pid_t fork(void)
-{
-	static pid_t (*plibc_func)(void) = NULL;
-	sigset_t sigset;
-	pid_t retval;
-	int saved_errno;
-
-	if (plibc_func == NULL) {
-		plibc_func = dlsym(RTLD_NEXT, "fork");
-		if (plibc_func == NULL) {
-			fprintf(stderr, "libustfork: unable to find \"fork\" symbol\n");
-			errno = ENOSYS;
-			return -1;
-		}
-	}
-
-	ust_before_fork(&sigset);
-	/* Do the real fork */
-	retval = plibc_func();
-	saved_errno = errno;
-	if (retval == 0) {
-		/* child */
-		ust_after_fork_child(&sigset);
-	} else {
-		ust_after_fork_parent(&sigset);
-	}
-	errno = saved_errno;
-	return retval;
-}
-
-int daemon(int nochdir, int noclose)
-{
-	static int (*plibc_func)(int nochdir, int noclose) = NULL;
-	sigset_t sigset;
-	int retval;
-	int saved_errno;
-
-	if (plibc_func == NULL) {
-		plibc_func = dlsym(RTLD_NEXT, "daemon");
-		if (plibc_func == NULL) {
-			fprintf(stderr, "libustfork: unable to find \"daemon\" symbol\n");
-			errno = ENOSYS;
-			return -1;
-		}
-	}
-
-	ust_before_fork(&sigset);
-	/* Do the real daemon call */
-	retval = plibc_func(nochdir, noclose);
-	saved_errno = errno;
-	if (retval == 0) {
-		/* child, parent called _exit() directly */
-		ust_after_fork_child(&sigset);
-	} else {
-		/* on error in the parent */
-		ust_after_fork_parent(&sigset);
-	}
-	errno = saved_errno;
-	return retval;
-}
-
 #ifdef __linux__
 
 struct user_desc;
