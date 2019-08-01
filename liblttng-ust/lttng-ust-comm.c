@@ -709,10 +709,12 @@ void decrement_sem_count(unsigned int count)
 }
 
 static
-int handle_register_done(struct sock_info *sock_info)
+void handle_register_done(struct sock_info *sock_info)
 {
-	if (sock_info->registration_done)
-		return 0;
+	if (sock_info->registration_done) {
+		return;
+	}
+
 	sock_info->registration_done = 1;
 
 	decrement_sem_count(1);
@@ -721,20 +723,25 @@ int handle_register_done(struct sock_info *sock_info)
 		decrement_sem_count(1);
 	}
 
-	return 0;
+	return;
 }
 
+/*
+ * This function is called when a listener thread cannot register with
+ * sessiond. When it happens, we don't want to delay the library constructor
+ * any longer.
+ */
 static
-int handle_register_failed(struct sock_info *sock_info)
+void handle_register_failed(struct sock_info *sock_info)
 {
-	if (sock_info->registration_done)
-		return 0;
+	if (sock_info->registration_done) {
+		return;
+	}
+
 	sock_info->registration_done = 1;
 	sock_info->initial_statedump_done = 1;
 
 	decrement_sem_count(2);
-
-	return 0;
 }
 
 /*
@@ -799,10 +806,12 @@ int handle_message(struct sock_info *sock_info,
 
 	switch (lum->cmd) {
 	case LTTNG_UST_REGISTER_DONE:
-		if (lum->handle == LTTNG_UST_ROOT_HANDLE)
-			ret = handle_register_done(sock_info);
-		else
+		if (lum->handle == LTTNG_UST_ROOT_HANDLE) {
+			handle_register_done(sock_info);
+			ret = 0;
+		} else {
 			ret = -EINVAL;
+		}
 		break;
 	case LTTNG_UST_RELEASE:
 		if (lum->handle == LTTNG_UST_ROOT_HANDLE)
@@ -1561,7 +1570,11 @@ void *ust_listener_thread(void *arg)
 	}
 
 	/* Restart trying to connect to the session daemon */
+	if (ust_lock()) {
+		goto quit;
+	}
 restart:
+	ust_unlock();
 	if (prev_connect_failed) {
 		/* Wait for sessiond availability with pipe */
 		wait_for_sessiond(sock_info);
@@ -1601,13 +1614,7 @@ restart:
 		DBG("Info: sessiond not accepting connections to %s apps socket", sock_info->name);
 		prev_connect_failed = 1;
 
-		/*
-		 * If we cannot find the sessiond daemon, don't delay
-		 * constructor execution.
-		 */
-		ret = handle_register_failed(sock_info);
-		assert(!ret);
-		ust_unlock();
+		handle_register_failed(sock_info);
 		goto restart;
 	}
 	fd = ret;
@@ -1617,7 +1624,6 @@ restart:
 		if (ret) {
 			PERROR("close on sock_info->socket");
 		}
-		ret = -1;
 		lttng_ust_unlock_fd_tracker();
 		ust_unlock();
 		goto quit;
@@ -1655,13 +1661,8 @@ restart:
 		ERR("Error registering to %s ust cmd socket",
 			sock_info->name);
 		prev_connect_failed = 1;
-		/*
-		 * If we cannot register to the sessiond daemon, don't
-		 * delay constructor execution.
-		 */
-		ret = handle_register_failed(sock_info);
-		assert(!ret);
-		ust_unlock();
+
+		handle_register_failed(sock_info);
 		goto restart;
 	}
 
@@ -1684,13 +1685,7 @@ restart:
 		DBG("Info: sessiond not accepting connections to %s apps socket", sock_info->name);
 		prev_connect_failed = 1;
 
-		/*
-		 * If we cannot find the sessiond daemon, don't delay
-		 * constructor execution.
-		 */
-		ret = handle_register_failed(sock_info);
-		assert(!ret);
-		ust_unlock();
+		handle_register_failed(sock_info);
 		goto restart;
 	}
 
@@ -1748,13 +1743,8 @@ restart:
 		ERR("Error registering to %s ust notify socket",
 			sock_info->name);
 		prev_connect_failed = 1;
-		/*
-		 * If we cannot register to the sessiond daemon, don't
-		 * delay constructor execution.
-		 */
-		ret = handle_register_failed(sock_info);
-		assert(!ret);
-		ust_unlock();
+
+		handle_register_failed(sock_info);
 		goto restart;
 	}
 recv_loop:
@@ -1779,12 +1769,8 @@ recv_loop:
 			 * and we need to wait before retry.
 			 */
 			prev_connect_failed = 1;
-			/*
-			 * If we cannot register to the sessiond daemon, don't
-			 * delay constructor execution.
-			 */
-			ret = handle_register_failed(sock_info);
-			assert(!ret);
+
+			handle_register_failed(sock_info);
 			ust_unlock();
 			goto end;
 		case sizeof(lum):
@@ -1825,8 +1811,7 @@ end:
 
 	/* Cleanup socket handles before trying to reconnect */
 	lttng_ust_objd_table_owner_cleanup(sock_info);
-	ust_unlock();
-	goto restart;	/* try to reconnect */
+	goto restart;
 
 quit:
 	ust_unlock();
