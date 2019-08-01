@@ -1168,6 +1168,30 @@ error:
 }
 
 static
+void close_sockets(struct sock_info *sock_info)
+{
+	int ret;
+	const char *name = sock_info->name;
+
+	if (sock_info->socket != -1) {
+		ret = ustcomm_close_unix_sock(sock_info->socket);
+		if (ret) {
+			ERR("could not close %s UST command socket", name);
+		}
+		sock_info->socket = -1;
+		sock_info->receiving = 0;
+	}
+
+	if (sock_info->notify_socket != -1) {
+		ret = ustcomm_close_unix_sock(sock_info->notify_socket);
+		if (ret) {
+			ERR("could not close %s UST notify socket", name);
+		}
+		sock_info->notify_socket = -1;
+	}
+}
+
+static
 void cleanup_sock_info(struct sock_info *sock_info, int exiting)
 {
 	int ret;
@@ -1189,24 +1213,12 @@ void cleanup_sock_info(struct sock_info *sock_info, int exiting)
 	 * responsibility of cleaning up these resources to the OS
 	 * process exit.
 	 */
-	if (exiting)
+	if (exiting) {
 		return;
+	}
 
-	if (sock_info->socket != -1) {
-		ret = ustcomm_close_unix_sock(sock_info->socket);
-		if (ret) {
-			ERR("Error closing ust cmd socket");
-		}
-		sock_info->socket = -1;
-		sock_info->receiving = 0;
-	}
-	if (sock_info->notify_socket != -1) {
-		ret = ustcomm_close_unix_sock(sock_info->notify_socket);
-		if (ret) {
-			ERR("Error closing ust notify socket");
-		}
-		sock_info->notify_socket = -1;
-	}
+	close_sockets(sock_info);
+
 	if (sock_info->wait_shm_mmap) {
 		long page_size;
 
@@ -1571,26 +1583,7 @@ restart:
 		goto quit;
 	}
 
-	if (sock_info->socket != -1) {
-		/* FD tracker is updated by ustcomm_close_unix_sock() */
-		ret = ustcomm_close_unix_sock(sock_info->socket);
-		if (ret) {
-			ERR("Error closing %s ust cmd socket",
-				sock_info->name);
-		}
-		sock_info->socket = -1;
-		sock_info->receiving = 0;
-	}
-	if (sock_info->notify_socket != -1) {
-		/* FD tracker is updated by ustcomm_close_unix_sock() */
-		ret = ustcomm_close_unix_sock(sock_info->notify_socket);
-		if (ret) {
-			ERR("Error closing %s ust notify socket",
-				sock_info->name);
-		}
-		sock_info->notify_socket = -1;
-	}
-
+	close_sockets(sock_info);
 
 	/*
 	 * Register. We need to perform both connect and sending
