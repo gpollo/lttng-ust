@@ -231,36 +231,6 @@ void ust_unlock(void)
 	}
 }
 
-static
-void disable_cancelstate(void)
-{
-	int oldstate;
-
-	errno = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
-	if (errno) {
-		PERROR("pthread_setcancelstate");
-	}
-
-	if (oldstate != PTHREAD_CANCEL_ENABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
-	}
-}
-
-static
-void enable_cancelstate(void)
-{
-	int oldstate;
-
-	errno = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &oldstate);
-	if (errno) {
-		PERROR("pthread_setcancelstate");
-	}
-
-	if (oldstate != PTHREAD_CANCEL_DISABLE) {
-		ERR("pthread_setcancelstate: unexpected oldstate");
-	}
-}
-
 /*
  * Wait for either of these before continuing to the main
  * program:
@@ -287,6 +257,18 @@ static int sem_count = sem_count_initial_value;
  */
 static DEFINE_URCU_TLS(int, lttng_ust_nest_count);
 
+enum listener_thread_state {
+	LISTENER_THREAD_RESTARTING,
+	LISTENER_THREAD_STARTING,
+	LISTENER_THREAD_CONNECT_COMMAND_SOCKET,
+	LISTENER_THREAD_REGISTER_COMMAND_SOCKET,
+	LISTENER_THREAD_CONNECT_NOTIFY_SOCKET,
+	LISTENER_THREAD_REGISTER_NOTIFY_SOCKET,
+	LISTENER_THREAD_RECEIVE_COMMAND,
+	LISTENER_THREAD_HANDLE_MESSAGE,
+	LISTENER_THREAD_SEND_REPLY,
+};
+
 /*
  * Info about socket and associated listener thread.
  */
@@ -309,7 +291,10 @@ struct sock_info {
 	int statedump_pending;
 	int initial_statedump_done;
 
-	int receiving;
+	int state;
+	union ust_args args;
+	struct ustcomm_ust_reply lur;
+	struct ustcomm_ust_msg lum;
 };
 
 /* Socket from app (connect) to session daemon (listen) for communication */
@@ -331,7 +316,7 @@ struct sock_info global_apps = {
 	.statedump_pending = 0,
 	.initial_statedump_done = 0,
 
-	.receiving = 0,
+	.state = LISTENER_THREAD_STARTING,
 };
 
 /* TODO: allow global_apps_sock_path override */
@@ -350,7 +335,7 @@ struct sock_info local_apps = {
 	.statedump_pending = 0,
 	.initial_statedump_done = 0,
 
-	.receiving = 0,
+	.state = LISTENER_THREAD_STARTING,
 };
 
 static int wait_poll_fallback;
@@ -781,22 +766,18 @@ void handle_pending_statedump(struct sock_info *sock_info)
 }
 
 static
-int handle_message(struct sock_info *sock_info,
-		int sock, struct ustcomm_ust_msg *lum)
+int handle_message(struct sock_info *sock_info)
 {
 	int ret = 0;
 	const struct lttng_ust_objd_ops *ops;
-	struct ustcomm_ust_reply lur;
-	union ust_args args;
 	char ctxstr[LTTNG_UST_SYM_NAME_LEN];	/* App context string. */
 	ssize_t len;
+	int sock = sock_info->socket;
+	union ust_args *args = &sock_info->args;
+	struct ustcomm_ust_reply *lur = &sock_info->lur;
+	struct ustcomm_ust_msg *lum = &sock_info->lum;
 
-	memset(&lur, 0, sizeof(lur));
-
-	if (ust_lock()) {
-		ret = -LTTNG_UST_ERR_EXITING;
-		goto error;
-	}
+	memset(lur, 0, sizeof(*lur));
 
 	ops = objd_ops(lum->handle);
 	if (!ops) {
@@ -878,7 +859,7 @@ int handle_message(struct sock_info *sock_info,
 		if (ops->cmd) {
 			ret = ops->cmd(lum->handle, lum->cmd,
 					(unsigned long) bytecode,
-					&args, sock_info);
+					args, sock_info);
 			if (ret) {
 				free(bytecode);
 			}
@@ -940,7 +921,7 @@ int handle_message(struct sock_info *sock_info,
 		if (ops->cmd) {
 			ret = ops->cmd(lum->handle, lum->cmd,
 					(unsigned long) node,
-					&args, sock_info);
+					args, sock_info);
 			if (ret) {
 				free(node);
 			}
@@ -982,12 +963,12 @@ int handle_message(struct sock_info *sock_info,
 				goto error;
 			}
 		}
-		args.channel.chan_data = chan_data;
-		args.channel.wakeup_fd = wakeup_fd;
+		args->channel.chan_data = chan_data;
+		args->channel.wakeup_fd = wakeup_fd;
 		if (ops->cmd)
 			ret = ops->cmd(lum->handle, lum->cmd,
 					(unsigned long) &lum->u,
-					&args, sock_info);
+					args, sock_info);
 		else
 			ret = -ENOSYS;
 		break;
@@ -997,8 +978,8 @@ int handle_message(struct sock_info *sock_info,
 		/* Receive shm_fd, wakeup_fd */
 		ret = ustcomm_recv_stream_from_sessiond(sock,
 			NULL,
-			&args.stream.shm_fd,
-			&args.stream.wakeup_fd);
+			&args->stream.shm_fd,
+			&args->stream.wakeup_fd);
 		if (ret) {
 			goto error;
 		}
@@ -1006,7 +987,7 @@ int handle_message(struct sock_info *sock_info,
 		if (ops->cmd)
 			ret = ops->cmd(lum->handle, lum->cmd,
 					(unsigned long) &lum->u,
-					&args, sock_info);
+					args, sock_info);
 		else
 			ret = -ENOSYS;
 		break;
@@ -1055,7 +1036,7 @@ int handle_message(struct sock_info *sock_info,
 			}
 			/* Put : between provider and ctxname. */
 			p[lum->u.context.u.app_ctx.provider_name_len - 1] = ':';
-			args.app_context.ctxname = ctxstr;
+			args->app_context.ctxname = ctxstr;
 			break;
 		}
 		default:
@@ -1064,7 +1045,7 @@ int handle_message(struct sock_info *sock_info,
 		if (ops->cmd) {
 			ret = ops->cmd(lum->handle, lum->cmd,
 					(unsigned long) &lum->u,
-					&args, sock_info);
+					args, sock_info);
 		} else {
 			ret = -ENOSYS;
 		}
@@ -1073,17 +1054,17 @@ int handle_message(struct sock_info *sock_info,
 		if (ops->cmd)
 			ret = ops->cmd(lum->handle, lum->cmd,
 					(unsigned long) &lum->u,
-					&args, sock_info);
+					args, sock_info);
 		else
 			ret = -ENOSYS;
 		break;
 	}
 
-	lur.handle = lum->handle;
-	lur.cmd = lum->cmd;
-	lur.ret_val = ret;
+	lur->handle = lum->handle;
+	lur->cmd = lum->cmd;
+	lur->ret_val = ret;
 	if (ret >= 0) {
-		lur.ret_code = LTTNG_UST_OK;
+		lur->ret_code = LTTNG_UST_OK;
 	} else {
 		/*
 		 * Use -LTTNG_UST_ERR as wildcard for UST internal
@@ -1095,75 +1076,70 @@ int handle_message(struct sock_info *sock_info,
 			/* Translate code to UST error. */
 			switch (ret) {
 			case -EEXIST:
-				lur.ret_code = -LTTNG_UST_ERR_EXIST;
+				lur->ret_code = -LTTNG_UST_ERR_EXIST;
 				break;
 			case -EINVAL:
-				lur.ret_code = -LTTNG_UST_ERR_INVAL;
+				lur->ret_code = -LTTNG_UST_ERR_INVAL;
 				break;
 			case -ENOENT:
-				lur.ret_code = -LTTNG_UST_ERR_NOENT;
+				lur->ret_code = -LTTNG_UST_ERR_NOENT;
 				break;
 			case -EPERM:
-				lur.ret_code = -LTTNG_UST_ERR_PERM;
+				lur->ret_code = -LTTNG_UST_ERR_PERM;
 				break;
 			case -ENOSYS:
-				lur.ret_code = -LTTNG_UST_ERR_NOSYS;
+				lur->ret_code = -LTTNG_UST_ERR_NOSYS;
 				break;
 			default:
-				lur.ret_code = -LTTNG_UST_ERR;
+				lur->ret_code = -LTTNG_UST_ERR;
 				break;
 			}
 		} else {
-			lur.ret_code = ret;
+			lur->ret_code = ret;
 		}
 	}
 	if (ret >= 0) {
 		switch (lum->cmd) {
 		case LTTNG_UST_TRACER_VERSION:
-			lur.u.version = lum->u.version;
+			lur->u.version = lum->u.version;
 			break;
 		case LTTNG_UST_TRACEPOINT_LIST_GET:
-			memcpy(&lur.u.tracepoint, &lum->u.tracepoint, sizeof(lur.u.tracepoint));
+			memcpy(&lur->u.tracepoint, &lum->u.tracepoint, sizeof(lur->u.tracepoint));
 			break;
 		}
 	}
-	DBG("Return value: %d", lur.ret_val);
+	DBG("Return value: %d", lur->ret_val);
 
-	ust_unlock();
+	return 0;
+error:
+	return ret;
+}
 
-	/*
-	 * Performed delayed statedump operations outside of the UST
-	 * lock. We need to take the dynamic loader lock before we take
-	 * the UST lock internally within handle_pending_statedump().
-	  */
-	handle_pending_statedump(sock_info);
+static
+int send_message_reply(struct sock_info *sock_info)
+{
+	int ret;
+	ssize_t len;
 
-	if (ust_lock()) {
-		ret = -LTTNG_UST_ERR_EXITING;
-		goto error;
-	}
-
-	ret = send_reply(sock, &lur);
+	ret = send_reply(sock_info->socket, &sock_info->lur);
 	if (ret < 0) {
-		DBG("error sending reply");
+		DBG("failed to send reply");
 		goto error;
 	}
 
-	/*
-	 * LTTNG_UST_TRACEPOINT_FIELD_LIST_GET needs to send the field
-	 * after the reply.
-	 */
-	if (lur.ret_code == LTTNG_UST_OK) {
-		switch (lum->cmd) {
+	/* LTTNG_UST_TRACEPOINT_FIELD_LIST_GET sends data after the reply */
+	if (sock_info->lur.ret_code == LTTNG_UST_OK) {
+		switch (sock_info->lum.cmd) {
 		case LTTNG_UST_TRACEPOINT_FIELD_LIST_GET:
-			len = ustcomm_send_unix_sock(sock,
-				&args.field_list.entry,
-				sizeof(args.field_list.entry));
+			len = ustcomm_send_unix_sock(sock_info->socket,
+				&sock_info->args.field_list.entry,
+				sizeof(sock_info->args.field_list.entry));
 			if (len < 0) {
 				ret = len;
 				goto error;
 			}
-			if (len != sizeof(args.field_list.entry)) {
+
+			if (len != sizeof(sock_info->args.field_list.entry)) {
 				ret = -EINVAL;
 				goto error;
 			}
@@ -1171,8 +1147,6 @@ int handle_message(struct sock_info *sock_info,
 	}
 
 error:
-	ust_unlock();
-
 	return ret;
 }
 
@@ -1188,7 +1162,6 @@ void close_sockets(struct sock_info *sock_info)
 			ERR("could not close %s UST command socket", name);
 		}
 		sock_info->socket = -1;
-		sock_info->receiving = 0;
 	}
 
 	if (sock_info->notify_socket != -1) {
@@ -1214,6 +1187,7 @@ void cleanup_sock_info(struct sock_info *sock_info, int exiting)
 	}
 	sock_info->registration_done = 0;
 	sock_info->initial_statedump_done = 0;
+	sock_info->state = LISTENER_THREAD_STARTING;
 
 	/*
 	 * wait_shm_mmap, socket and notify socket are used by listener
@@ -1537,6 +1511,172 @@ error:
 	return;
 }
 
+enum {
+	UST_LISTENER_THREAD_OK = 0,
+	UST_LISTENER_THREAD_FAILED = -1,
+	UST_LISTENER_THREAD_QUIT = -2,
+};
+
+static
+int connect_listener_socket(struct sock_info *sock_info)
+{
+	int ret, fd;
+	long timeout = get_connect_sock_timeout();
+
+	lttng_ust_lock_fd_tracker();
+
+	fd = ustcomm_connect_unix_sock(sock_info->sock_path, timeout);
+	if (fd < 0) {
+		DBG("lttng-sessiond not accepting connections to %s socket", sock_info->name);
+		ret = UST_LISTENER_THREAD_FAILED;
+		goto connect_failed;
+	}
+
+	ret = lttng_ust_add_fd_to_tracker(fd);
+	if (ret < 0) {
+		ret = UST_LISTENER_THREAD_QUIT;
+		goto tracker_failed;
+	}
+
+	ret = fd;
+	goto end;
+
+tracker_failed:
+	if (close(fd) < 0) {
+		PERROR("close");
+	}
+connect_failed:
+	handle_register_failed(sock_info);
+end:
+	lttng_ust_unlock_fd_tracker();
+	return ret;
+}
+
+static
+int register_command_socket(struct sock_info *sock_info)
+{
+	int ret, handle;
+
+	/*
+	 * Create only one root handle per listener thread for the whole
+	 * process lifetime, so we ensure we get ID which is statically
+	 * assigned to the root handle.
+	 */
+	if (sock_info->root_handle == -1) {
+		handle = lttng_abi_create_root_handle();
+		if (handle < 0) {
+			ERR("Could not create root handle");
+			ret = UST_LISTENER_THREAD_QUIT;
+			goto error;
+		}
+		sock_info->root_handle = handle;
+	}
+
+	ret = register_to_sessiond(sock_info->socket, USTCTL_SOCKET_CMD);
+	if (ret < 0) {
+		ERR("Could not register to %s UST command socket", sock_info->name);
+		ret = UST_LISTENER_THREAD_FAILED;
+		goto error;
+	}
+
+	return UST_LISTENER_THREAD_OK;
+
+error:
+	handle_register_failed(sock_info);
+	return ret;
+}
+
+static
+int register_notify_socket(struct sock_info *sock_info)
+{
+	int ret;
+	int socket = sock_info->notify_socket;
+	long timeout = get_notify_sock_timeout();
+
+	if (timeout >= 0) {
+		/* Give at least 10ms to sessiond to reply to notifications. */
+		if (timeout < 10) {
+			timeout = 10;
+		}
+
+		ret = ustcomm_setsockopt_rcv_timeout(socket, timeout);
+		if (ret < 0) {
+			WARN("Error setting socket receive timeout");
+		}
+
+		ret = ustcomm_setsockopt_snd_timeout(socket, timeout);
+		if (ret < 0) {
+			WARN("Error setting socket send timeout");
+		}
+	} else if (timeout < -1) {
+		WARN("Unsupported timeout value %ld", timeout);
+	}
+
+	ret = register_to_sessiond(socket, USTCTL_SOCKET_NOTIFY);
+	if (ret < 0) {
+		ERR("Could not register to %s UST notify socket", sock_info->name);
+		goto error;
+	}
+
+	return UST_LISTENER_THREAD_OK;
+
+error:
+	handle_register_failed(sock_info);
+	return UST_LISTENER_THREAD_FAILED;
+}
+
+static
+int receive_command(struct sock_info *sock_info)
+{
+	int ret;
+	ssize_t len;
+	struct ustcomm_ust_msg *lum = &sock_info->lum;
+
+	len = ustcomm_recv_unix_sock(sock_info->socket, lum, sizeof(*lum));
+	switch (len) {
+	case 0:	/* orderly shutdown */
+		DBG("%s lttng-sessiond has performed an orderly shutdown", sock_info->name);
+
+		/*
+		 * Either sessiond has shutdown or refused us by closing the socket.
+		 * In either case, we don't want to delay construction execution,
+		 * and we need to wait before retry.
+		 */
+		if (ust_lock()) {
+			ret = UST_LISTENER_THREAD_QUIT;
+			goto quit;
+		}
+		ust_unlock();
+
+		ret = UST_LISTENER_THREAD_FAILED;
+		goto error;
+	case sizeof(*lum):
+		print_cmd(lum->cmd, lum->handle);
+		break;
+	default:
+		if (len < 0) {
+			DBG("Receive failed from lttng-sessiond with errno %d", (int) -len);
+		} else {
+			DBG("Incorrect message size (%s socket): %zd", sock_info->name, len);
+		}
+
+		if (len == -ECONNRESET) {
+			DBG("%s remote end closed connection", sock_info->name);
+		}
+
+		ret = UST_LISTENER_THREAD_FAILED;
+		goto error;
+	}
+
+	return UST_LISTENER_THREAD_OK;
+
+quit:
+	ust_unlock();
+error:
+	handle_register_failed(sock_info);
+	return ret;
+}
+
 /*
  * This thread does not allocate any resource, except within
  * handle_message, within mutex protection. This mutex protects against
@@ -1548,270 +1688,209 @@ static
 void *ust_listener_thread(void *arg)
 {
 	struct sock_info *sock_info = arg;
-	int sock, ret, prev_connect_failed = 0, has_waited = 0, fd;
-	long timeout;
+	int ret, has_waited = 0, fd;
 
 	lttng_ust_fixup_tls();
 
-	if (sock_info->receiving) {
-		if (ust_lock()) {
-			goto quit;
-		}
-		goto recv_loop;
-	}
-
-	/*
-	 * If available, add '-ust' to the end of this thread's
-	 * process name
-	 */
+	/* Add '-ust' to the end of this thread's name if available */
 	ret = lttng_ust_setustprocname();
 	if (ret) {
 		ERR("Unable to set UST process name");
 	}
 
-	/* Restart trying to connect to the session daemon */
-	if (ust_lock()) {
-		goto quit;
+	switch(sock_info->state) {
+	case LISTENER_THREAD_RESTARTING:
+		ust_lock_nocheck();
+		goto restarting;
+	case LISTENER_THREAD_STARTING:
+	case LISTENER_THREAD_CONNECT_COMMAND_SOCKET:
+		goto connect_command_socket;
+	case LISTENER_THREAD_REGISTER_COMMAND_SOCKET:
+		goto register_command_socket;
+	case LISTENER_THREAD_CONNECT_NOTIFY_SOCKET:
+		goto connect_notify_socket;
+	case LISTENER_THREAD_REGISTER_NOTIFY_SOCKET:
+		goto register_notify_socket;
+	case LISTENER_THREAD_RECEIVE_COMMAND:
+		goto receive_command;
+	case LISTENER_THREAD_HANDLE_MESSAGE:
+		goto handle_message;
+	case LISTENER_THREAD_SEND_REPLY:
+		goto send_reply;
+	default:
+		assert(0);
 	}
-restart:
+
+restarting:
 	ust_unlock();
-	if (prev_connect_failed) {
-		/* Wait for sessiond availability with pipe */
-		wait_for_sessiond(sock_info);
-		if (has_waited) {
-			has_waited = 0;
-			/*
-			 * Sleep for 5 seconds before retrying after a
-			 * sequence of failure / wait / failure. This
-			 * deals with a killed or broken session daemon.
-			 */
-			sleep(5);
-		} else {
-			has_waited = 1;
-		}
-		prev_connect_failed = 0;
+	sock_info->state = LISTENER_THREAD_RESTARTING;
+	wait_for_sessiond(sock_info);
+
+	/*
+	 * Sleep for 5 seconds before retrying after a sequence of failure /
+	 * wait / failure. This deals with a killed or broken session daemon.
+	 */
+	if (has_waited) {
+		has_waited = 0;
+		sleep(5);
+	} else {
+		has_waited = 1;
 	}
 
+	/*
+	 * Register. We need to perform both connect and sending registration
+	 * message before doing the next connect otherwise we may reach unix
+	 * socket connect queue max limits and block on the 2nd connect while
+	 * the session daemon is awaiting the first connect registration message.
+	 */
+
+	/* Close sockets if needed */
 	if (ust_lock()) {
 		goto quit;
 	}
-
 	close_sockets(sock_info);
-
-	/*
-	 * Register. We need to perform both connect and sending
-	 * registration message before doing the next connect otherwise
-	 * we may reach unix socket connect queue max limits and block
-	 * on the 2nd connect while the session daemon is awaiting the
-	 * first connect registration message.
-	 */
-	/* Connect cmd socket */
-	lttng_ust_lock_fd_tracker();
-	ret = ustcomm_connect_unix_sock(sock_info->sock_path,
-		get_connect_sock_timeout());
-	if (ret < 0) {
-		lttng_ust_unlock_fd_tracker();
-		DBG("Info: sessiond not accepting connections to %s apps socket", sock_info->name);
-		prev_connect_failed = 1;
-
-		handle_register_failed(sock_info);
-		goto restart;
-	}
-	fd = ret;
-	ret = lttng_ust_add_fd_to_tracker(fd);
-	if (ret < 0) {
-		ret = close(fd);
-		if (ret) {
-			PERROR("close on sock_info->socket");
-		}
-		lttng_ust_unlock_fd_tracker();
-		ust_unlock();
-		goto quit;
-	}
-
-	sock_info->socket = ret;
-	lttng_ust_unlock_fd_tracker();
-
 	ust_unlock();
-	/*
-	 * Unlock/relock ust lock because connect is blocking (with
-	 * timeout). Don't delay constructors on the ust lock for too
-	 * long.
-	 */
+
+connect_command_socket:
+	sock_info->state = LISTENER_THREAD_CONNECT_COMMAND_SOCKET;
 	if (ust_lock()) {
 		goto quit;
 	}
-
-	/*
-	 * Create only one root handle per listener thread for the whole
-	 * process lifetime, so we ensure we get ID which is statically
-	 * assigned to the root handle.
-	 */
-	if (sock_info->root_handle == -1) {
-		ret = lttng_abi_create_root_handle();
-		if (ret < 0) {
-			ERR("Error creating root handle");
-			goto quit;
-		}
-		sock_info->root_handle = ret;
+	fd = connect_listener_socket(sock_info);
+	switch(fd) {
+	case UST_LISTENER_THREAD_FAILED:
+		goto restarting;
+	case UST_LISTENER_THREAD_QUIT:
+		goto quit;
+	default:
+		break;
 	}
-
-	ret = register_to_sessiond(sock_info->socket, USTCTL_SOCKET_CMD);
-	if (ret < 0) {
-		ERR("Error registering to %s ust cmd socket",
-			sock_info->name);
-		prev_connect_failed = 1;
-
-		handle_register_failed(sock_info);
-		goto restart;
-	}
-
+	sock_info->socket = fd;
 	ust_unlock();
+
 	/*
-	 * Unlock/relock ust lock because connect is blocking (with
-	 * timeout). Don't delay constructors on the ust lock for too
-	 * long.
+	 * Unlock/relock ust lock because connect is blocking (with timeout).
+	 * Don't delay constructors on the ust lock for too long.
 	 */
+
+register_command_socket:
+	sock_info->state = LISTENER_THREAD_REGISTER_COMMAND_SOCKET;
 	if (ust_lock()) {
 		goto quit;
 	}
-
-	/* Connect notify socket */
-	lttng_ust_lock_fd_tracker();
-	ret = ustcomm_connect_unix_sock(sock_info->sock_path,
-		get_connect_sock_timeout());
-	if (ret < 0) {
-		lttng_ust_unlock_fd_tracker();
-		DBG("Info: sessiond not accepting connections to %s apps socket", sock_info->name);
-		prev_connect_failed = 1;
-
-		handle_register_failed(sock_info);
-		goto restart;
-	}
-
-	fd = ret;
-	ret = lttng_ust_add_fd_to_tracker(fd);
-	if (ret < 0) {
-		ret = close(fd);
-		if (ret) {
-			PERROR("close on sock_info->notify_socket");
-		}
-		ret = -1;
-		lttng_ust_unlock_fd_tracker();
-		ust_unlock();
+	ret = register_command_socket(sock_info);
+	switch(ret) {
+	case UST_LISTENER_THREAD_OK:
+		break;
+	case UST_LISTENER_THREAD_FAILED:
+		goto restarting;
+	case UST_LISTENER_THREAD_QUIT:
 		goto quit;
+	default:
+		assert(0);
 	}
-
-	sock_info->notify_socket = ret;
-	lttng_ust_unlock_fd_tracker();
-
 	ust_unlock();
+
 	/*
-	 * Unlock/relock ust lock because connect is blocking (with
-	 * timeout). Don't delay constructors on the ust lock for too
-	 * long.
+	 * Unlock/relock ust lock because connect is blocking (with timeout).
+	 * Don't delay constructors on the ust lock for too long.
 	 */
+
+connect_notify_socket:
+	sock_info->state = LISTENER_THREAD_CONNECT_NOTIFY_SOCKET;
 	if (ust_lock()) {
 		goto quit;
 	}
-
-	timeout = get_notify_sock_timeout();
-	if (timeout >= 0) {
-		/*
-		 * Give at least 10ms to sessiond to reply to
-		 * notifications.
-		 */
-		if (timeout < 10)
-			timeout = 10;
-		ret = ustcomm_setsockopt_rcv_timeout(sock_info->notify_socket,
-				timeout);
-		if (ret < 0) {
-			WARN("Error setting socket receive timeout");
-		}
-		ret = ustcomm_setsockopt_snd_timeout(sock_info->notify_socket,
-				timeout);
-		if (ret < 0) {
-			WARN("Error setting socket send timeout");
-		}
-	} else if (timeout < -1) {
-		WARN("Unsupported timeout value %ld", timeout);
+	fd = connect_listener_socket(sock_info);
+	switch(fd) {
+	case UST_LISTENER_THREAD_FAILED:
+		goto restarting;
+	case UST_LISTENER_THREAD_QUIT:
+		goto quit;
+	default:
+		break;
 	}
-
-	ret = register_to_sessiond(sock_info->notify_socket,
-			USTCTL_SOCKET_NOTIFY);
-	if (ret < 0) {
-		ERR("Error registering to %s ust notify socket",
-			sock_info->name);
-		prev_connect_failed = 1;
-
-		handle_register_failed(sock_info);
-		goto restart;
-	}
-recv_loop:
-	sock = sock_info->socket;
-	sock_info->receiving = 1;
+	sock_info->notify_socket = fd;
 	ust_unlock();
+
+	/*
+	 * Unlock/relock ust lock because connect is blocking (with timeout).
+	 * Don't delay constructors on the ust lock for too long.
+	 */
+
+register_notify_socket:
+	sock_info->state = LISTENER_THREAD_REGISTER_NOTIFY_SOCKET;
+	if (ust_lock()) {
+		goto quit;
+	}
+	ret = register_notify_socket(sock_info);
+	switch(ret) {
+	case UST_LISTENER_THREAD_OK:
+		break;
+	case UST_LISTENER_THREAD_FAILED:
+		goto restarting;
+	default:
+		assert(0);
+	}
+	ust_unlock();
+
+	/* Main listener thread loop */
 
 	for (;;) {
-		ssize_t len;
-		struct ustcomm_ust_msg lum;
-
-		len = ustcomm_recv_unix_sock(sock, &lum, sizeof(lum));
-		switch (len) {
-		case 0:	/* orderly shutdown */
-			DBG("%s lttng-sessiond has performed an orderly shutdown", sock_info->name);
-			if (ust_lock()) {
-				goto quit;
-			}
-			/*
-			 * Either sessiond has shutdown or refused us by closing the socket.
-			 * In either case, we don't want to delay construction execution,
-			 * and we need to wait before retry.
-			 */
-			prev_connect_failed = 1;
-
-			handle_register_failed(sock_info);
-			ust_unlock();
+receive_command:
+		sock_info->state = LISTENER_THREAD_RECEIVE_COMMAND;
+		ret = receive_command(sock_info);
+		switch(ret) {
+		case UST_LISTENER_THREAD_OK:
+			break;
+		case UST_LISTENER_THREAD_FAILED:
 			goto end;
-		case sizeof(lum):
-			print_cmd(lum.cmd, lum.handle);
-			disable_cancelstate();
-			ret = handle_message(sock_info, sock, &lum);
-			if (ret) {
-				enable_cancelstate();
-				ERR("Error handling message for %s socket",
-					sock_info->name);
-				/*
-				 * Close socket if protocol error is
-				 * detected.
-				 */
-				goto end;
-			}
-			enable_cancelstate();
-			continue;
-		default:
-			if (len < 0) {
-				DBG("Receive failed from lttng-sessiond with errno %d", (int) -len);
-			} else {
-				DBG("incorrect message size (%s socket): %zd", sock_info->name, len);
-			}
-			if (len == -ECONNRESET) {
-				DBG("%s remote end closed connection", sock_info->name);
-				goto end;
-			}
-			goto end;
+		case UST_LISTENER_THREAD_QUIT:
+			ust_lock_nocheck();
+			goto quit;
 		}
 
+handle_message:
+		sock_info->state = LISTENER_THREAD_HANDLE_MESSAGE;
+		if (ust_lock()) {
+			goto quit;
+		}
+		ret = handle_message(sock_info);
+		if (ret) {
+			ERR("could not handle message for %s socket", sock_info->name);
+			ust_unlock();
+			goto end;
+		}
+		ust_unlock();
+
+		/*
+		 * Performed delayed statedump operations outside of the UST
+		 * lock. We need to take the dynamic loader lock before we take
+		 * the UST lock internally within handle_pending_statedump().
+		  */
+		handle_pending_statedump(sock_info);
+
+send_reply:
+		sock_info->state = LISTENER_THREAD_SEND_REPLY;
+		if (ust_lock()) {
+			goto quit;
+		}
+		ret = send_message_reply(sock_info);
+		if (ret) {
+			ERR("could not send reply for %s socket", sock_info->name);
+			ust_unlock();
+			goto end;
+		}
+		ust_unlock();
 	}
 end:
 	if (ust_lock()) {
 		goto quit;
 	}
-	sock_info->receiving = 0;
 
 	/* Cleanup socket handles before trying to reconnect */
 	lttng_ust_objd_table_owner_cleanup(sock_info);
-	goto restart;
+	goto restarting;
 
 quit:
 	ust_unlock();
@@ -1819,6 +1898,7 @@ quit:
 	ust_exit_lock();
 	sock_info->thread_active = 0;
 	ust_exit_unlock();
+
 	return NULL;
 }
 
